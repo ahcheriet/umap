@@ -813,12 +813,14 @@ def esum(z):
 def esum1(z, centroids):
     return np.sum(np.exp(z)*centroids.T)
 
+#compute the probability assignment for the first tech using softmax function
 @numba.njit(fastmath=True)
 def softmax_op(z):
     num = np.exp(z)
     s = num / esum(z)
     return s
 
+#compute the probability assignment for the second tech using smooth sterngthing membership of UMAP
 @numba.njit(fastmath=True)
 def Q(embedding, centroids, a, b):
 
@@ -833,6 +835,7 @@ def Q(embedding, centroids, a, b):
 
     return q
 
+#computethe atrget variable P
 @numba.njit(fastmath=True)
 def P(q):
     weight = q ** 2 / q.sum(0)
@@ -847,7 +850,7 @@ def update_dep_centroids(data, centroids, dim, n_clusters, n, p, q):
             grad_coeff = p[i, k]*q[i,k]/n + p[i, k]/n
             for d in range(dim):
                 grad_d =grad_coeff * x[d]
-                centroid[d] += grad_d #*(x[d]-centroid[d])
+                centroid[d] += grad_d
     return centroids
 
 @numba.njit(fastmath=True)
@@ -860,12 +863,12 @@ def update_dep_points(x, centroids, dim, n_clusters, n, p):
         grad_coeff = (-p[k]/n)*centroid.T+(s/s1)
 
         for d in range(dim):
-            x[d] += grad_coeff[d] #*(x[d]-centroid[d])
+            x[d] += grad_coeff[d]
     return x
 
 @numba.njit(fastmath=True)
 def clustering_layout_first_tech(embedding, centroids, n_epochs, y):
-    """alpha=initial_alpha"""
+    #alpha=initial_alpha
     dim=embedding.shape[1]
     n = embedding.shape[0]
     n_clusters=centroids.shape[0]
@@ -902,18 +905,8 @@ def update_centroids(data, centroids, dim, n_clusters, a, b, p, q):
             dist_squared = rdist(x, centroid)
 
             if dist_squared > 0.0:
-                """grad_coeff = (
-                    -2.0
-                    * a
-                    * b
-                    * pow(dist_squared, b - 1.0)
-                )
-                grad_coeff /= (
-                        a * pow(dist_squared, b) + 1.0
-                )"""
                 grad_coeff = pow((a * pow(dist_squared, b) + 1.0), -1.0)
-                #grad_coeff = pow((dist_squared + 1.0), -1.0)
-                grad_coeff *= -0.0001 * (p[i, k] - q[i,k])
+                grad_coeff *= -2.0 * (p[i, k] - q[i,k])
             else:
                 grad_coeff = 0.0
 
@@ -932,18 +925,8 @@ def update_points(current, centroids, dim, n_clusters, a, b, p, q):
         dist_squared = rdist(current, centroid)
 
         if dist_squared > 0.0:
-            """grad_coeff = (
-                    -2.0
-                    * a
-                    * b
-                    * pow(dist_squared, b - 1.0)
-            )
-            grad_coeff /= (
-                    a * pow(dist_squared, b) + 1.0
-            )"""
             grad_coeff = pow((a * pow(dist_squared, b) + 1.0), -1.0)
-            #grad_coeff = pow((dist_squared + 1.0), -1.0)
-            grad_coeff *= 0.0001 * (p[k] - q[k])
+            grad_coeff *= 2.0 * (p[k] - q[k])
         else:
             grad_coeff = 0.0
 
@@ -966,7 +949,6 @@ def clustering_layout_second_tech(embedding, centroids, a, b,  n_epochs, y):
         q=Q(embedding, centroids, a, b)
         p=P(q)
         for i in range(embedding.shape[0]):
-            #for k in range(centroids.shape[0]):
             embedding[i] = update_points(embedding[i], centroids, dim, n_clusters, a, b, p[i], q[i])
         centroids = update_centroids(embedding, centroids, dim, n_clusters, a, b, p, q)
         """alpha = initial_alpha * (
