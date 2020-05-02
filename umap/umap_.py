@@ -18,6 +18,7 @@ except ImportError:
     # sklearn.externals.joblib is deprecated in 0.21, will be removed in 0.23
     from sklearn.externals import joblib
 
+from sklearn.cluster import KMeans
 import numpy as np
 import scipy.sparse
 import scipy.sparse.csgraph
@@ -804,6 +805,183 @@ def rdist(x, y):
 
     return result
 
+@numba.njit(fastmath=True)
+def esum(z):
+    return np.sum(np.exp(z))
+
+@numba.njit(fastmath=True)
+def esum1(z, centroids):
+    return np.sum(np.exp(z)*centroids.T)
+
+@numba.njit(fastmath=True)
+def softmax_op(z):
+    num = np.exp(z)
+    s = num / esum(z)
+    return s
+
+@numba.njit(fastmath=True)
+def Q(embedding, centroids, a, b):
+
+    q=np.zeros((embedding.shape[0],centroids.shape[0]))
+    for i in range(embedding.shape[0]):
+        data=embedding[i]
+        for k in range(centroids.shape[0]):
+            dist_squared = rdist(data, centroids[k])
+            q[i,k]=pow((1.0 +a*pow(dist_squared,b)),-1.0)
+            #q[i, k] = pow((1.0 + dist_squared), -1.0)
+    q/= q.sum(0)
+
+    return q
+
+@numba.njit(fastmath=True)
+def P(q):
+    weight = q ** 2 / q.sum(0)
+    return (weight.T / weight.sum(1)).T
+
+@numba.njit(fastmath=True)
+def update_dep_centroids(data, centroids, dim, n_clusters, n, p, q):
+    for k in range(n_clusters):
+        centroid = centroids[k]
+        for i in range(data.shape[0]):
+            x = data[i]
+            grad_coeff = p[i, k]*q[i,k]/n + p[i, k]/n
+            for d in range(dim):
+                grad_d =grad_coeff * x[d]
+                centroid[d] += grad_d #*(x[d]-centroid[d])
+    return centroids
+
+@numba.njit(fastmath=True)
+def update_dep_points(x, centroids, dim, n_clusters, n, p):
+
+    for k in range(n_clusters):
+        centroid=centroids[k]
+        s = (p[k]/n) * esum1(x * centroids.T, centroids)
+        s1=esum(x*centroids.T)
+        grad_coeff = (-p[k]/n)*centroid.T+(s/s1)
+
+        for d in range(dim):
+            x[d] += grad_coeff[d] #*(x[d]-centroid[d])
+    return x
+
+@numba.njit(fastmath=True)
+def clustering_layout_first_tech(embedding, centroids, n_epochs, y):
+    """alpha=initial_alpha"""
+    dim=embedding.shape[1]
+    n = embedding.shape[0]
+    n_clusters=centroids.shape[0]
+    tol=0.001
+    y_pred_last = y
+    y_pred=np.zeros(embedding.shape[0])
+    for n in range(n_epochs):
+        pred=embedding*centroids.T
+        q=softmax_op(pred)
+        p=P(q)
+        for i in range(embedding.shape[0]):
+            embedding[i] = update_dep_points(embedding[i], centroids, dim, n_clusters, n, p[i])
+        centroids = update_dep_centroids(embedding, centroids, dim, n_clusters, n, p, q)
+        """alpha = initial_alpha * (
+                1.0 - (float(n) / float(n_epochs))
+        )"""
+        """for l in range(q.shape[0]):
+            y_pred[l] = np.argmax(q[l])
+        print(np.shape(y_pred))
+        delta_label = np.sum(y_pred != y_pred_last) / y_pred.shape[0]
+        y_pred_last = np.copy(y_pred)
+        if n_epochs > 0 and delta_label < tol:
+            print('delta_label ', delta_label, '< tol ', tol)
+            print('Reached tolerance threshold. Stopping training.')
+            break"""
+    return embedding, centroids
+
+@numba.njit(fastmath=True)
+def update_centroids(data, centroids, dim, n_clusters, a, b, p, q):
+    for k in range(n_clusters):
+        centroid = centroids[k]
+        for i in range(data.shape[0]):
+            x = data[i]
+            dist_squared = rdist(x, centroid)
+
+            if dist_squared > 0.0:
+                """grad_coeff = (
+                    -2.0
+                    * a
+                    * b
+                    * pow(dist_squared, b - 1.0)
+                )
+                grad_coeff /= (
+                        a * pow(dist_squared, b) + 1.0
+                )"""
+                grad_coeff = pow((a * pow(dist_squared, b) + 1.0), -1.0)
+                #grad_coeff = pow((dist_squared + 1.0), -1.0)
+                grad_coeff *= -0.0001 * (p[i, k] - q[i,k])
+            else:
+                grad_coeff = 0.0
+
+            for d in range(dim):
+                grad_d = clip(
+                    grad_coeff * (x[d] - centroid[d])
+                )
+                centroid[d] += grad_d
+    return centroids
+
+@numba.njit(fastmath=True)
+def update_points(current, centroids, dim, n_clusters, a, b, p, q):
+
+    for k in range(n_clusters):
+        centroid=centroids[k]
+        dist_squared = rdist(current, centroid)
+
+        if dist_squared > 0.0:
+            """grad_coeff = (
+                    -2.0
+                    * a
+                    * b
+                    * pow(dist_squared, b - 1.0)
+            )
+            grad_coeff /= (
+                    a * pow(dist_squared, b) + 1.0
+            )"""
+            grad_coeff = pow((a * pow(dist_squared, b) + 1.0), -1.0)
+            #grad_coeff = pow((dist_squared + 1.0), -1.0)
+            grad_coeff *= 0.0001 * (p[k] - q[k])
+        else:
+            grad_coeff = 0.0
+
+        for d in range(dim):
+            grad_d = clip(
+                grad_coeff * (current[d] - centroid[d])
+            )
+            current[d] += grad_d
+    return current
+
+@numba.njit(fastmath=True)
+def clustering_layout_second_tech(embedding, centroids, a, b,  n_epochs, y):
+    """alpha=initial_alpha"""
+    dim=embedding.shape[1]
+    n_clusters=centroids.shape[0]
+    tol=0.001
+    y_pred_last = y
+    y_pred=np.zeros(embedding.shape[0])
+    for n in range(n_epochs):
+        q=Q(embedding, centroids, a, b)
+        p=P(q)
+        for i in range(embedding.shape[0]):
+            #for k in range(centroids.shape[0]):
+            embedding[i] = update_points(embedding[i], centroids, dim, n_clusters, a, b, p[i], q[i])
+        centroids = update_centroids(embedding, centroids, dim, n_clusters, a, b, p, q)
+        """alpha = initial_alpha * (
+                1.0 - (float(n) / float(n_epochs))
+        )"""
+        """for l in range(q.shape[0]):
+            y_pred[l] = np.argmax(q[l])
+        print(np.shape(y_pred))
+        delta_label = np.sum(y_pred != y_pred_last) / y_pred.shape[0]
+        y_pred_last = np.copy(y_pred)
+        if n_epochs > 0 and delta_label < tol:
+            print('delta_label ', delta_label, '< tol ', tol)
+            print('Reached tolerance threshold. Stopping training.')
+            break"""
+    return embedding, centroids
 
 @numba.njit(fastmath=True, parallel=True)
 def optimize_layout(
@@ -812,6 +990,9 @@ def optimize_layout(
     head,
     tail,
     n_epochs,
+    centroids,
+    n_clusters,
+    y_pred,
     n_vertices,
     epochs_per_sample,
     a,
@@ -968,7 +1149,8 @@ def optimize_layout(
                     n_neg_samples
                     * epochs_per_negative_sample[i]
                 )
-
+        #head_embedding, centroids = clustering_layout_first_tech(head_embedding, centroids, 0, y_pred)
+        head_embedding, centroids =clustering_layout_second_tech(head_embedding, centroids, a, b, 0, y_pred)
         alpha = initial_alpha * (
             1.0 - (float(n) / float(n_epochs))
         )
@@ -978,13 +1160,13 @@ def optimize_layout(
                 "\tcompleted ", n, " / ", n_epochs, "epochs"
             )
 
-    return head_embedding
-
+    return head_embedding, centroids
 
 def simplicial_set_embedding(
     data,
     graph,
     n_components,
+    n_clusters,
     initial_alpha,
     a,
     b,
@@ -1064,6 +1246,7 @@ def simplicial_set_embedding(
     embedding: array of shape (n_samples, n_components)
         The optimized of ``graph`` into an ``n_components`` dimensional
         euclidean space.
+        :param n_clusters:
     """
     graph = graph.tocoo()
     graph.sum_duplicates()
@@ -1097,6 +1280,10 @@ def simplicial_set_embedding(
             metric=metric,
             metric_kwds=metric_kwds,
         )
+        """ae = n2d.AutoEncoder(data.shape[-1], n_components)
+                manifoldGMM = n2d.UmapGMM(n_components)
+                harcluster = n2d.n2d(ae, manifoldGMM)
+                initialisation =harcluster.fitAE(data, weight_id = "ae_weights.h5")"""
         expansion = 10.0 / np.abs(initialisation).max()
         embedding = (initialisation * expansion).astype(
             np.float32
@@ -1133,12 +1320,20 @@ def simplicial_set_embedding(
     rng_state = random_state.randint(
         INT32_MIN, INT32_MAX, 3
     ).astype(np.int64)
-    embedding = optimize_layout(
+    kmeans=KMeans(n_clusters=n_clusters, random_state=0)
+    y_pred = kmeans.fit_predict(embedding)
+    centroids = kmeans.cluster_centers_
+    """centroids = kmeans.cluster_centers_.T
+    centroids = centroids / np.sqrt(np.diag(np.matmul(centroids.T, centroids)))"""
+    embedding, centroids = optimize_layout(
         embedding,
         embedding,
         head,
         tail,
         n_epochs,
+        centroids,
+        n_clusters,
+        y_pred,
         n_vertices,
         epochs_per_sample,
         a,
@@ -1149,8 +1344,12 @@ def simplicial_set_embedding(
         negative_sample_rate,
         verbose=verbose,
     )
+    #embedding, centroids= clustering_layout(embedding, centroids, a, b, n_epochs,y_pred)
+    y_pred = Q(embedding,centroids, a, b)
+    #y=np.dot(embedding, centroids.T)
+    #y_pred=softmax_op(y)
 
-    return embedding
+    return embedding, y_pred
 
 
 @numba.njit()
@@ -1386,6 +1585,7 @@ class UMAP(BaseEstimator):
         n_components=2,
         metric="euclidean",
         n_epochs=None,
+        n_clusters=None,
         learning_rate=1.0,
         init="spectral",
         min_dist=0.1,
@@ -1412,6 +1612,7 @@ class UMAP(BaseEstimator):
         self.metric = metric
         self.metric_kwds = metric_kwds
         self.n_epochs = n_epochs
+        self.n_clusters=n_clusters
         self.init = init
         self.n_components = n_components
         self.repulsion_strength = repulsion_strength
@@ -1777,10 +1978,11 @@ class UMAP(BaseEstimator):
         if self.verbose:
             print(ts(), "Construct embedding")
 
-        self.embedding_ = simplicial_set_embedding(
+        self.embedding_, self.y_pred = simplicial_set_embedding(
             self._raw_data,
             self.graph_,
             self.n_components,
+            self.n_clusters,
             self._initial_alpha,
             self._a,
             self._b,
@@ -1823,7 +2025,7 @@ class UMAP(BaseEstimator):
             Embedding of the training data in low-dimensional space.
         """
         self.fit(X, y)
-        return self.embedding_
+        return self.embedding_, self.y_pred
 
     def transform(self, X):
         """Transform X into the existing embedded space and return that
